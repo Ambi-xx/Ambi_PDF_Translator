@@ -31,7 +31,8 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export async function translateBatch(texts: string[]): Promise<string[]> {
   if (texts.length === 0) return [];
   
-  const batchSize = 25;
+  // Larger batch size to reduce total request count
+  const batchSize = 45;
   const results: string[] = [];
   
   for (let i = 0; i < texts.length; i += batchSize) {
@@ -46,13 +47,15 @@ Input Segments: ${JSON.stringify(batch)}`;
 
     let success = false;
     let attempts = 0;
-    const maxAttempts = 3;
+    const maxAttempts = 4;
 
     while (!success && attempts < maxAttempts) {
         try {
           if (attempts > 0) {
-            // Exponential backoff for retries
-            await sleep(Math.pow(2, attempts) * 1000);
+            // More aggressive backoff: 5s, 10s, 20s...
+            const backoffTime = Math.pow(2, attempts) * 3000;
+            console.log(`Rate limit backoff: Waiting ${backoffTime}ms...`);
+            await sleep(backoffTime);
           }
 
           const response = await ai.models.generateContent({
@@ -71,35 +74,34 @@ Input Segments: ${JSON.stringify(batch)}`;
             results.push(...translatedBatch);
             success = true;
           } else {
-            console.warn("Batch size mismatch, retry attempt:", attempts + 1);
+            console.warn(`Batch mismatch (expected ${batch.length}, got ${translatedBatch.length}). Retry ${attempts + 1}`);
             attempts++;
           }
         } catch (error: any) {
           const errorMsg = error?.message || String(error);
-          console.error("Batch translation error:", errorMsg);
           
-          // Check for 429 Rate Limit
           if (errorMsg.includes("429") || error?.status === 429) {
-            console.log("Rate limit hit (429), slowing down and waiting for retry...");
+            console.warn("Gemini Rate Limit (429) encountered. Increasing delay...");
             attempts++;
-            await sleep(2000 * attempts); // Manual wait before next attempt
+            await sleep(5000 * attempts); 
           } else {
-            // Non-429 error, don't retry too many times
-            console.warn("Non-429 error occurred, falling back to original text for this batch");
-            results.push(...batch);
-            success = true;
+            console.error("Translation batch error:", errorMsg);
+            attempts++;
+            if (attempts >= maxAttempts) {
+              results.push(...batch);
+              success = true;
+            }
           }
         }
     }
 
     if (!success) {
-      // If all retries failed, keep original text
       results.push(...batch);
     }
     
-    // Add a mandatory delay between batches to stay under rate limits
+    // Safety delay between batches to stay under free tier RPM limits
     if (i + batchSize < texts.length) {
-      await sleep(1000); 
+      await sleep(4500); 
     }
   }
 
